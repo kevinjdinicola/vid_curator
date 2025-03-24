@@ -107,7 +107,7 @@ fn organize_them(conn: Connection, base_dir: &Path, source_path: &Path, dest_mov
                 if tr.size_deviation < 0.7f32 {
                     dest_path.push("extras");
                 }
-                dest_path.push(tr.file_name);
+                dest_path.push(format!("{} - {}",current_movie_title.as_ref().unwrap(), tr.file_name));
                 // println!("{}", tr.path);
                 // println!("  {}", dest_path.display());
             } else {
