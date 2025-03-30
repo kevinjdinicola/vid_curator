@@ -344,7 +344,7 @@ fn main() -> anyhow::Result<()> {
 
                 },
                 Ok(e) => {
-                    println!("something else: {:?}", e);
+                    // println!("something else: {:?}", e);
                 },
                 Err(e) => println!("Watch error: {:?}", e),
             }
