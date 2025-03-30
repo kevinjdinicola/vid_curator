@@ -308,11 +308,12 @@ fn main() -> anyhow::Result<()> {
     println!("vid_curator starting");
 
     // first we walk the whole thing and add it all into the db, itll be processed when scanned
-    // for entry in WalkDir::new(&full_source_dir) {
-    //     let entry = entry?;
-    //     let entry_path = entry.path();
-    //     process_discovered_file(&conn, entry_path, root_path_levels)?;
-    // }
+    println!("scanning vid dir for changes...");
+    for entry in WalkDir::new(&full_source_dir) {
+        let entry = entry?;
+        let entry_path = entry.path();
+        process_discovered_file(&conn, entry_path, root_path_levels)?;
+    }
 
     let p = Path::new(base_dir);
     let last_update_requested = Arc::new(AtomicU64::new(now_as_millis()));
@@ -353,9 +354,10 @@ fn main() -> anyhow::Result<()> {
     let mut last_update_performed: u64 = 0;
     loop {
         if last_update_performed != last_update_requested.load(Ordering::Relaxed) {
-            println!("Received request to reprocess un-curated files... debouncing");
+            let debounce_time_elapsed = now_as_millis() - last_update_requested.load(Ordering::Relaxed);
+            println!("Received request to reprocess un-curated files... debouncing after 5 secs: {}", debounce_time_elapsed);
             // we've requested an update, cool, but I want that request to be at least 5 seconds old
-            if now_as_millis() - last_update_requested.load(Ordering::Relaxed) > 5000 {
+            if debounce_time_elapsed > 5000 {
                 println!("Checking for un-curated recently added videos");
                 let _ = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
                 last_update_performed = last_update_requested.load(Ordering::Relaxed);
@@ -365,8 +367,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     // this is a scan - we should do it after initialization and debounce do it upon file discovery
-    let p = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
-    watcher_thread.join().expect("Watcher thread panicked");
+    // let p = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
+    // watcher_thread.join().expect("Watcher thread panicked");
     Ok(())
 
 }
