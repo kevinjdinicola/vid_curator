@@ -274,14 +274,14 @@ fn main() -> anyhow::Result<()> {
     // let base_dir: &Path = Path::new("/Volumes/md0/transmission_data");
     let base_dir: &Path = Path::new("/mnt/md0/transmission_data/");
     let source_dir = Path::new("completed");
-    let dest_movie_dir =  Path::new("sorted_movies_2_testing");
-    let dest_tv_dir = Path::new("sorted_tv_2_testing");
+    let dest_movie_dir =  Path::new("sorted_movies_2");
+    let dest_tv_dir = Path::new("sorted_tv_2");
 
     let full_source_dir = PathBuf::from(base_dir).join(source_dir);
 
     let root_path_levels = full_source_dir.components().count();
 
-    let db_path = PathBuf::from("./").join("vid_paths_testing.db");
+    let db_path = PathBuf::from("./").join("vid_paths.db");
     let conn = Connection::open(&db_path)?;
     conn.execute(
         "
