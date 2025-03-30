@@ -308,11 +308,11 @@ fn main() -> anyhow::Result<()> {
     println!("vid_curator starting");
 
     // first we walk the whole thing and add it all into the db, itll be processed when scanned
-    for entry in WalkDir::new(&full_source_dir) {
-        let entry = entry?;
-        let entry_path = entry.path();
-        process_discovered_file(&conn, entry_path, root_path_levels)?;
-    }
+    // for entry in WalkDir::new(&full_source_dir) {
+    //     let entry = entry?;
+    //     let entry_path = entry.path();
+    //     process_discovered_file(&conn, entry_path, root_path_levels)?;
+    // }
 
     let p = Path::new(base_dir);
     let last_update_requested = Arc::new(AtomicU64::new(now_as_millis()));
@@ -337,7 +337,9 @@ fn main() -> anyhow::Result<()> {
                     watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
 
                 },
-                Ok(_) => {},
+                Ok(e) => {
+                    println!("something else: {:?}", e);
+                },
                 Err(e) => println!("Watch error: {:?}", e),
             }
         }
