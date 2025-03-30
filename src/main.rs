@@ -8,7 +8,8 @@ use std::os::unix::fs::symlink;
 use std::{fs, io, thread};
 use std::sync::mpsc;
 use std::time::Duration;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{ModifyKind, RenameMode};
 
 fn safe_slice(input: &str, index: usize) -> Option<&str> {
     if index <= input.len() && input.is_char_boundary(index) {
@@ -319,7 +320,11 @@ fn main() -> anyhow::Result<()> {
 
         loop {
             match rx.recv() {
-                Ok(event) => println!("File system event: {:?}", event),
+                Ok(Ok(notify::Event { kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)), paths: ref p, .. } )) => {
+                    println!("noticed this file! {:?}", p)
+
+                },
+                Ok(_) => println!("Dont care"),
                 Err(e) => println!("Watch error: {:?}", e),
             }
         }
