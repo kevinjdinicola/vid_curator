@@ -5,8 +5,10 @@ use regex::Regex;
 use rusqlite::{params, Connection};
 use rusqlite::types::Value;
 use std::os::unix::fs::symlink;
-use std::{fs, io};
-
+use std::{fs, io, thread};
+use std::sync::mpsc;
+use std::time::Duration;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 
 fn safe_slice(input: &str, index: usize) -> Option<&str> {
     if index <= input.len() && input.is_char_boundary(index) {
@@ -154,16 +156,17 @@ fn organize_them(conn: Connection, base_dir: &Path, source_path: &Path, dest_mov
 
 fn main() -> anyhow::Result<()> {
 
-    let base_dir: &str = "/mnt/md0/transmission_data/";
+    // let base_dir: &Path = Path::new("/Volumes/md0/transmission_data");
+    let base_dir: &Path = Path::new("/mnt/md0/transmission_data/");
     let source_dir = Path::new("completed");
-    let dest_movie_dir =  Path::new("sorted_movies_2");
-    let dest_tv_dir = Path::new("sorted_tv_2");
+    let dest_movie_dir =  Path::new("sorted_movies_2_mac");
+    let dest_tv_dir = Path::new("sorted_tv_2_mac");
 
     let full_source_dir = PathBuf::from(base_dir).join(source_dir);
 
     let root_path_levels = full_source_dir.components().count();
 
-    let db_path = PathBuf::from("~/").join("vid_paths.db");
+    let db_path = PathBuf::from("./").join("vid_paths.db");
     let conn = Connection::open(db_path)?;
     conn.execute(
         "
@@ -200,7 +203,8 @@ fn main() -> anyhow::Result<()> {
 
 
 
-    for entry in WalkDir::new(full_source_dir) {
+    for entry in WalkDir::new(&full_source_dir) {
+        break;
         let entry = entry?;
         let mut naming_result: usize = 0;
         if let Some(ext) = entry.path().extension() {
@@ -303,9 +307,28 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let p = Path::new(base_dir);
-    let p =
-    organize_them(conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
 
+    let (tx, rx) = mpsc::channel();
+    let full_source_dir = full_source_dir.clone();
+    let watcher_thread = thread::spawn(move || {
+        let mut watcher = RecommendedWatcher::new(tx, Config::default())
+            .expect("Failed to initialize watcher");
+
+        watcher.watch(full_source_dir.as_path(), RecursiveMode::Recursive)
+            .expect("Failed to watch directory");
+
+        loop {
+            match rx.recv() {
+                Ok(event) => println!("File system event: {:?}", event),
+                Err(e) => println!("Watch error: {:?}", e),
+            }
+        }
+    });
+
+
+
+    // let p = organize_them(conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
+    watcher_thread.join().expect("Watcher thread panicked");
     Ok(())
 
 }
