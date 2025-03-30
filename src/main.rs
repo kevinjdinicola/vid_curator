@@ -331,7 +331,12 @@ fn main() -> anyhow::Result<()> {
             match rx.recv() {
                 Ok(Ok(notify::Event { kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)), paths: ref p, .. } )) => {
                     for pb in p {
-                        let _ = process_discovered_file(&watch_conn, pb.as_path(), root_path_levels);
+                        match process_discovered_file(&watch_conn, pb.as_path(), root_path_levels) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                println!("Failed to process discovered file {:?}", e);
+                            }
+                        }
                     }
                     println!("noticed this file! {:?}", p);
                     watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
