@@ -6,8 +6,10 @@ use rusqlite::{params, Connection};
 use rusqlite::types::Value;
 use std::os::unix::fs::symlink;
 use std::{fs, io, thread};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{mpsc, Arc, LazyLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::sleep;
+use std::time::{Duration, SystemTime};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify::event::{ModifyKind, RenameMode};
 
@@ -34,6 +36,16 @@ struct TitleResult {
     size_deviation: f32
 }
 
+const SEASON_REGEX: LazyLock<Regex>= LazyLock::new(|| { Regex::new(r"(?i)S(\d{2})[EX](\d{2})").unwrap() });
+const YEAR_REGEX: LazyLock<Regex> = LazyLock::new(|| { Regex::new(r"(?i)(\d{4})").unwrap() });
+const IGNORE_FILE_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| { Regex::new(r"(?i)sample").unwrap() });
+const EXTENSIONS: &[&str] = &["mp4", "mkv"];
+
+fn now_as_millis() -> u64 {
+    let now = SystemTime::now();
+    now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
 fn create_symlink_with_dirs(target: &Path, link_path: &Path) -> io::Result<()> {
     // Ensure the parent directory of the symlink exists
     if let Some(parent) = link_path.parent() {
@@ -46,7 +58,7 @@ fn create_symlink_with_dirs(target: &Path, link_path: &Path) -> io::Result<()> {
     symlink(target, link_path)?;
     Ok(())
 }
-fn organize_them(conn: Connection, base_dir: &Path, source_path: &Path, dest_movie_dir: &Path, dest_tv_dir: &Path) -> anyhow::Result<()> {
+fn organize_them(conn: &Connection, base_dir: &Path, source_path: &Path, dest_movie_dir: &Path, dest_tv_dir: &Path) -> anyhow::Result<()> {
     println!("organizing them!");
     let mut stmt = conn.prepare("
     select id, path, title, file_size, group_key, is_movie, season_number,
@@ -155,20 +167,122 @@ fn organize_them(conn: Connection, base_dir: &Path, source_path: &Path, dest_mov
 
 }
 
+fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_levels: usize) -> anyhow::Result<()> {
+    let mut naming_result: usize = 0;
+
+    if let Some(ext) = entry_path.extension() {
+        let target_ext = ext.to_string_lossy();
+        if !EXTENSIONS.contains(&target_ext.as_ref()) {
+            return Ok(())
+        }
+    } else {
+        return Ok(())
+    }
+
+    if entry_path.is_file() {
+        let maybe_file_name = entry_path.file_name().unwrap().to_str();
+        let mut end_cut: Option<usize> = None;
+        if let Some(file_name) = maybe_file_name {
+
+            let metadata = match std::fs::metadata(entry_path) {
+                Ok(md) => md,
+                Err(e) => return Ok(())
+            };
+            let file_size = metadata.len() / (1024 * 1024);
+
+
+
+            if let Some(_) = IGNORE_FILE_NAME_REGEX.captures(file_name) {
+                return Ok(())
+            }
+
+            let mut is_movie = true;
+            let (season, episode) = if let Some(captures) = SEASON_REGEX.captures(file_name) {
+                let season = captures.get(1).unwrap().as_str();
+                let episode = captures.get(2).unwrap().as_str();
+                end_cut = Some(captures.get(1).unwrap().start());
+
+                is_movie = false;
+                // println!("  {season} {episode}");
+                (Value::Integer(season.parse()?), Value::Integer(episode.parse()?))
+            } else {
+                (Value::Null, Value::Null)
+            };
+
+            // println!("{file_name}");
+            // println!("  Movie: {is_movie}");
+            if let Some(yr_capture) = YEAR_REGEX.captures(file_name) {
+                let year = yr_capture.get(1).unwrap().as_str();
+
+                // println!("  year: {year}");
+                let yr_end_cut = yr_capture.get(1).unwrap().start();
+                end_cut = match((end_cut, yr_end_cut)) {
+                    (None, _) => Some(yr_end_cut),
+                    (Some(ec), yec) if yec < ec => Some(yec),
+                    _ => end_cut
+                }
+            }
+            let good_name = if let Some(end_cut) = end_cut {
+                if let Some(slice_res) = safe_slice(file_name, end_cut - 1) {
+                    let cleaned = slice_res.trim_end_matches('.');
+                    // println!("  Good name: {cleaned}");
+                    cleaned
+                } else {
+                    naming_result = 1;
+                    file_name
+                }
+            } else {
+                // println!("  Couldn't calculate good name");
+                let p = entry_path.to_str().unwrap();
+                // println!("  Path is: {p}");
+                naming_result = 2;
+                file_name
+            };
+
+            let depth = entry_path.components().count() - root_path_levels;
+            // println!("depth is {depth}");
+            let mut relative_path = PathBuf::new();
+            for (index, component) in entry_path.iter().skip(root_path_levels).enumerate() {
+                relative_path.push(component);
+                // println!("  lvl: {index}: {:?}", component);
+            }
+            // println!("  relative_path: {relative_path:?}");
+            let group_key = if let Some(first) = entry_path.iter().skip(root_path_levels).next() {
+                // println!("  first part is {:?}", first);
+                first.to_str().unwrap()
+            } else {
+                entry_path.to_str().unwrap()
+            };
+            // println!("  size is {file_size}");
+
+            let mut processed_good_name = good_name.replace(".", " ");
+            processed_good_name = processed_good_name.to_lowercase();
+
+            conn.execute(
+                "INSERT INTO titles (path, file_name, title, file_size, group_key, is_movie, season_number, episode_number, naming_result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(path) DO NOTHING;",
+                params![relative_path.to_str().unwrap(), file_name, processed_good_name.trim(), file_size, group_key, is_movie, season, episode, naming_result],
+            )?;
+            println!("Discovered {:?}", entry_path)
+        }
+    }
+    Ok(())
+
+}
+
 fn main() -> anyhow::Result<()> {
 
     // let base_dir: &Path = Path::new("/Volumes/md0/transmission_data");
     let base_dir: &Path = Path::new("/mnt/md0/transmission_data/");
     let source_dir = Path::new("completed");
-    let dest_movie_dir =  Path::new("sorted_movies_2_mac");
-    let dest_tv_dir = Path::new("sorted_tv_2_mac");
+    let dest_movie_dir =  Path::new("sorted_movies_2_testing");
+    let dest_tv_dir = Path::new("sorted_tv_2_testing");
 
     let full_source_dir = PathBuf::from(base_dir).join(source_dir);
 
     let root_path_levels = full_source_dir.components().count();
 
-    let db_path = PathBuf::from("./").join("vid_paths.db");
-    let conn = Connection::open(db_path)?;
+    let db_path = PathBuf::from("./").join("vid_paths_testing.db");
+    let conn = Connection::open(&db_path)?;
     conn.execute(
         "
         CREATE TABLE IF NOT EXISTS titles (
@@ -192,125 +306,20 @@ fn main() -> anyhow::Result<()> {
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_titles_path ON titles(path)",[])?;
 
     println!("vid_curator starting");
-    let mut extensions = HashSet::new();
-    extensions.insert("mp4".to_string());
-    extensions.insert("mkv".to_string());
 
-    let season_regex = Regex::new(r"(?i)S(\d{2})[EX](\d{2})").unwrap();
-
-    let year_regex = Regex::new(r"(?i)(\d{4})").unwrap();
-
-    let ignore_file_name_regex = Regex::new(r"(?i)sample").unwrap();
-
-
-
+    // first we walk the whole thing and add it all into the db, itll be processed when scanned
     for entry in WalkDir::new(&full_source_dir) {
-        break;
         let entry = entry?;
-        let mut naming_result: usize = 0;
-        if let Some(ext) = entry.path().extension() {
-            let target_ext = ext.to_string_lossy();
-            if !extensions.contains(target_ext.as_ref()) {
-               continue
-            }
-        } else {
-            continue
-        }
-
-        if entry.file_type().is_file() {
-            let maybe_file_name= entry.file_name().to_str();
-            let mut end_cut: Option<usize> = None;
-            if let Some(file_name) = maybe_file_name {
-
-                let metadata = match std::fs::metadata(entry.path()) {
-                    Ok(md) => md,
-                    Err(e) => continue
-                };
-                let file_size = metadata.len() / (1024 * 1024);
-
-
-
-                if let Some(_) = ignore_file_name_regex.captures(file_name) {
-                    continue
-                }
-
-                let mut is_movie = true;
-                let (season, episode) = if let Some(captures) = season_regex.captures(file_name) {
-                    let season = captures.get(1).unwrap().as_str();
-                    let episode = captures.get(2).unwrap().as_str();
-                    end_cut = Some(captures.get(1).unwrap().start());
-
-                    is_movie = false;
-                    // println!("  {season} {episode}");
-                    (Value::Integer(season.parse()?), Value::Integer(episode.parse()?))
-                } else {
-                    (Value::Null, Value::Null)
-                };
-
-                // println!("{file_name}");
-                // println!("  Movie: {is_movie}");
-                if let Some(yr_capture) = year_regex.captures(file_name) {
-                    let year = yr_capture.get(1).unwrap().as_str();
-
-                    // println!("  year: {year}");
-                    let yr_end_cut = yr_capture.get(1).unwrap().start();
-                    end_cut = match((end_cut, yr_end_cut)) {
-                        (None, _) => Some(yr_end_cut),
-                        (Some(ec), yec) if yec < ec => Some(yec),
-                        _ => end_cut
-                    }
-                }
-                let good_name = if let Some(end_cut) = end_cut {
-                    if let Some(slice_res) = safe_slice(file_name, end_cut - 1) {
-                        let cleaned = slice_res.trim_end_matches('.');
-                        // println!("  Good name: {cleaned}");
-                        cleaned
-                    } else {
-                        naming_result = 1;
-                        file_name
-                    }
-                } else {
-                    // println!("  Couldn't calculate good name");
-                    let p = entry.path().to_str().unwrap();
-                    // println!("  Path is: {p}");
-                    naming_result = 2;
-                    file_name
-                };
-
-                let path = entry.path();
-                let depth = path.components().count() - root_path_levels;
-                // println!("depth is {depth}");
-                let mut relative_path = PathBuf::new();
-                for (index, component) in path.iter().skip(root_path_levels).enumerate() {
-                    relative_path.push(component);
-                    // println!("  lvl: {index}: {:?}", component);
-                }
-                // println!("  relative_path: {relative_path:?}");
-                let group_key = if let Some(first) = path.iter().skip(root_path_levels).next() {
-                    // println!("  first part is {:?}", first);
-                    first.to_str().unwrap()
-                } else {
-                    entry.path().to_str().unwrap()
-                };
-                // println!("  size is {file_size}");
-
-                let mut processed_good_name = good_name.replace(".", " ");
-                processed_good_name = processed_good_name.to_lowercase();
-
-                conn.execute(
-                    "INSERT INTO titles (path, file_name, title, file_size, group_key, is_movie, season_number, episode_number, naming_result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(path) DO NOTHING;",
-                    params![relative_path.to_str().unwrap(), file_name, processed_good_name.trim(), file_size, group_key, is_movie, season, episode, naming_result],
-                )?;
-
-
-            }
-
-        }
+        let entry_path = entry.path();
+        process_discovered_file(&conn, entry_path, root_path_levels)?;
     }
+
     let p = Path::new(base_dir);
+    let last_update_requested = Arc::new(AtomicU64::new(now_as_millis()));
 
     let (tx, rx) = mpsc::channel();
-    let full_source_dir = full_source_dir.clone();
+    let watch_conn = Connection::open(&db_path)?;
+    let watcher_last_update_requested = last_update_requested.clone();
     let watcher_thread = thread::spawn(move || {
         let mut watcher = RecommendedWatcher::new(tx, Config::default())
             .expect("Failed to initialize watcher");
@@ -321,7 +330,11 @@ fn main() -> anyhow::Result<()> {
         loop {
             match rx.recv() {
                 Ok(Ok(notify::Event { kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)), paths: ref p, .. } )) => {
-                    println!("noticed this file! {:?}", p)
+                    for pb in p {
+                        let _ = process_discovered_file(&watch_conn, pb.as_path(), root_path_levels);
+                    }
+                    println!("noticed this file! {:?}", p);
+                    watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
 
                 },
                 Ok(_) => println!("Dont care"),
@@ -330,9 +343,22 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    let mut last_update_performed: u64 = 0;
+    loop {
+        if last_update_performed != last_update_requested.load(Ordering::Relaxed) {
+            println!("Received request to reprocess un-curated files... debouncing");
+            // we've requested an update, cool, but I want that request to be at least 5 seconds old
+            if now_as_millis() - last_update_requested.load(Ordering::Relaxed) > 5000 {
+                println!("Checking for un-curated recently added videos");
+                let _ = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
+                last_update_performed = last_update_requested.load(Ordering::Relaxed);
+            }
+        }
+        sleep(Duration::from_millis(1000));
+    }
 
-
-    // let p = organize_them(conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
+    // this is a scan - we should do it after initialization and debounce do it upon file discovery
+    let p = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
     watcher_thread.join().expect("Watcher thread panicked");
     Ok(())
 
