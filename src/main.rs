@@ -337,7 +337,7 @@ fn main() -> anyhow::Result<()> {
                     watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
 
                 },
-                Ok(_) => println!("Dont care"),
+                Ok(_) => {},
                 Err(e) => println!("Watch error: {:?}", e),
             }
         }
