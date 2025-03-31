@@ -277,7 +277,7 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
                 "INSERT INTO titles (path, file_name, title, file_size, group_key, is_movie, season_number, episode_number, naming_result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(path) DO NOTHING;",
                 params![relative_path.to_str().unwrap(), file_name, name_res.name, file_size, group_key, name_res.is_movie, name_res.season, name_res.episode, naming_result],
             )?;
-            println!("Discovered {}, is_movie: {}, season: {:?}, episode: {?}", name_res.name, name_res.is_movie, name_res.season, name_res.episode)
+            println!("Discovered {}, is_movie: {}, season: {:?}, episode: {:?}", name_res.name, name_res.is_movie, name_res.season, name_res.episode)
         }
     }
     Ok(())
