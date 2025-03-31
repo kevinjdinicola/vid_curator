@@ -167,6 +167,64 @@ fn organize_them(conn: &Connection, base_dir: &Path, source_path: &Path, dest_mo
 
 }
 
+struct FindNameResult {
+    name: String,
+    is_movie: bool,
+    season: Option<usize>,
+    episode: Option<usize>,
+    naming_result: usize
+}
+fn find_name(file_name: &str) -> anyhow::Result<FindNameResult> {
+    let mut is_movie = true;
+    let mut end_cut: Option<usize> = None;
+    let mut naming_result: usize = 0;
+
+    let (season, episode) = if let Some(captures) = SEASON_REGEX.captures(file_name) {
+        let season = captures.get(1).unwrap().as_str();
+        let episode = captures.get(2).unwrap().as_str();
+        end_cut = Some(captures.get(1).unwrap().start());
+
+        is_movie = false;
+        // println!("  {season} {episode}");
+        (Some(season.parse()?), Some(episode.parse()?))
+    } else {
+        (None, None)
+    };
+
+
+    if let Some(yr_capture) = YEAR_REGEX.captures(file_name) {
+        let year = yr_capture.get(1).unwrap().as_str();
+        let yr_end_cut = yr_capture.get(1).unwrap().start();
+        end_cut = match((end_cut, yr_end_cut)) {
+            (None, _) => Some(yr_end_cut),
+            (Some(ec), yec) if yec < ec => Some(yec),
+            _ => end_cut
+        }
+    }
+    let good_name = if let Some(end_cut) = end_cut {
+        if let Some(slice_res) = safe_slice(file_name, end_cut - 1) {
+            let cleaned = slice_res.trim_end_matches('.');
+            cleaned
+        } else {
+            naming_result = 1;
+            file_name
+        }
+    } else {
+        eprintln!("Couldnt calculate a good name");
+        naming_result = 2;
+        file_name
+    };
+    let mut processed_good_name = good_name.replace(".", " ");
+    processed_good_name = processed_good_name.to_lowercase();
+    Ok(FindNameResult {
+        name: processed_good_name,
+        is_movie,
+        season,
+        episode,
+        naming_result
+    })
+}
+
 fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_levels: usize) -> anyhow::Result<()> {
     let mut naming_result: usize = 0;
 
@@ -190,54 +248,12 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
             };
             let file_size = metadata.len() / (1024 * 1024);
 
-
-
             if let Some(_) = IGNORE_FILE_NAME_REGEX.captures(file_name) {
                 return Ok(())
             }
 
-            let mut is_movie = true;
-            let (season, episode) = if let Some(captures) = SEASON_REGEX.captures(file_name) {
-                let season = captures.get(1).unwrap().as_str();
-                let episode = captures.get(2).unwrap().as_str();
-                end_cut = Some(captures.get(1).unwrap().start());
+            let name_res = find_name(file_name)?;
 
-                is_movie = false;
-                // println!("  {season} {episode}");
-                (Value::Integer(season.parse()?), Value::Integer(episode.parse()?))
-            } else {
-                (Value::Null, Value::Null)
-            };
-
-            // println!("{file_name}");
-            // println!("  Movie: {is_movie}");
-            if let Some(yr_capture) = YEAR_REGEX.captures(file_name) {
-                let year = yr_capture.get(1).unwrap().as_str();
-
-                // println!("  year: {year}");
-                let yr_end_cut = yr_capture.get(1).unwrap().start();
-                end_cut = match((end_cut, yr_end_cut)) {
-                    (None, _) => Some(yr_end_cut),
-                    (Some(ec), yec) if yec < ec => Some(yec),
-                    _ => end_cut
-                }
-            }
-            let good_name = if let Some(end_cut) = end_cut {
-                if let Some(slice_res) = safe_slice(file_name, end_cut - 1) {
-                    let cleaned = slice_res.trim_end_matches('.');
-                    // println!("  Good name: {cleaned}");
-                    cleaned
-                } else {
-                    naming_result = 1;
-                    file_name
-                }
-            } else {
-                // println!("  Couldn't calculate good name");
-                let p = entry_path.to_str().unwrap();
-                // println!("  Path is: {p}");
-                naming_result = 2;
-                file_name
-            };
 
             let depth = entry_path.components().count() - root_path_levels;
             // println!("depth is {depth}");
@@ -255,12 +271,11 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
             };
             // println!("  size is {file_size}");
 
-            let mut processed_good_name = good_name.replace(".", " ");
-            processed_good_name = processed_good_name.to_lowercase();
+
 
             conn.execute(
                 "INSERT INTO titles (path, file_name, title, file_size, group_key, is_movie, season_number, episode_number, naming_result) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(path) DO NOTHING;",
-                params![relative_path.to_str().unwrap(), file_name, processed_good_name.trim(), file_size, group_key, is_movie, season, episode, naming_result],
+                params![relative_path.to_str().unwrap(), file_name, name_res.name, file_size, group_key, name_res.is_movie, name_res.season, name_res.episode, naming_result],
             )?;
             println!("Discovered {:?}", entry_path)
         }
@@ -274,14 +289,14 @@ fn main() -> anyhow::Result<()> {
     // let base_dir: &Path = Path::new("/Volumes/md0/transmission_data");
     let base_dir: &Path = Path::new("/mnt/md0/transmission_data/");
     let source_dir = Path::new("completed");
-    let dest_movie_dir =  Path::new("sorted_movies_2");
-    let dest_tv_dir = Path::new("sorted_tv_2");
+    let dest_movie_dir =  Path::new("sorted_movies_2_test");
+    let dest_tv_dir = Path::new("sorted_tv_2_test");
 
     let full_source_dir = PathBuf::from(base_dir).join(source_dir);
 
     let root_path_levels = full_source_dir.components().count();
 
-    let db_path = PathBuf::from("./").join("vid_paths.db");
+    let db_path = PathBuf::from("./").join("vid_paths_testing.db");
     let conn = Connection::open(&db_path)?;
     conn.execute(
         "
