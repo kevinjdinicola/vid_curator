@@ -215,7 +215,7 @@ fn find_name(file_name: &str) -> anyhow::Result<FindNameResult> {
         file_name
     };
     let mut processed_good_name = good_name.replace(".", " ");
-    processed_good_name = processed_good_name.to_lowercase();
+    processed_good_name = processed_good_name.trim_ascii().to_lowercase();
     Ok(FindNameResult {
         name: processed_good_name,
         is_movie,
