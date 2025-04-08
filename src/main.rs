@@ -273,8 +273,8 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
 
 
 fn main() -> anyhow::Result<()> {
-    // let base_dir: &Path = Path::new("/Volumes/md0/transmission_data");
-    let base_dir: &Path = Path::new("/mnt/md0/transmission_data/");
+    // let base_dir: &Path = Path::new("/Volumes/archive/transmission_data");
+    let base_dir: &Path = Path::new("/mnt/archive/transmission_data/");
     let source_dir = Path::new("completed");
     let dest_movie_dir =  Path::new("sorted_movies_2");
     let dest_tv_dir = Path::new("sorted_tv_2");
