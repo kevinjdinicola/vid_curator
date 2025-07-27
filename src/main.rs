@@ -287,8 +287,8 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
 
 
 fn main() -> anyhow::Result<()> {
-    // let base_dir: &Path = Path::new("./test_base");
-    let base_dir: &Path = Path::new("/mnt/archive/transmission_data/");
+    let base_dir: &Path = Path::new("./test_base");
+    // let base_dir: &Path = Path::new("/mnt/archive/transmission_data/");
     let source_dir = Path::new("completed");
     let dest_movie_dir =  Path::new("sorted_movies_2");
     let dest_tv_dir = Path::new("sorted_tv_2");
@@ -353,6 +353,23 @@ fn main() -> anyhow::Result<()> {
 
                     let mut do_update = false;
                     for pb in p {
+                        let path = pb.as_path();
+                        if path.is_dir() {
+                            println!("scanning vid dir for changes...");
+                            for entry in WalkDir::new(&path) {
+                                if let Ok(entry) = entry {
+                                    let entry_path = entry.path();
+                                    match process_discovered_file(&watch_conn, entry_path, root_path_levels) {
+                                        Ok(_) => {
+                                            do_update = true;
+                                        }
+                                        Err(e) => {
+                                            println!("Failed to process discovered file {:?}", pb.as_path());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         match process_discovered_file(&watch_conn, pb.as_path(), root_path_levels) {
                             Ok(_) => {
                                 do_update = true;
@@ -381,9 +398,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         if last_update_performed != last_update_requested.load(Ordering::Relaxed) {
             let debounce_time_elapsed = now_as_millis() - last_update_requested.load(Ordering::Relaxed);
-            println!("Received request to reprocess un-curated files... debouncing after 10 secs: {}", debounce_time_elapsed);
+            println!("Received request to reprocess un-curated files... debouncing after 2 secs: {}", debounce_time_elapsed);
             // we've requested an update, cool, but I want that request to be at least 2 seconds old
-            if debounce_time_elapsed > 10000 {
+            if debounce_time_elapsed > 2000 {
                 println!("Checking for un-curated recently added videos");
                 let _ = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
                 last_update_performed = last_update_requested.load(Ordering::Relaxed);
