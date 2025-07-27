@@ -1,4 +1,4 @@
-use notify::event::{ModifyKind, RenameMode};
+use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use rusqlite::{params, Connection};
@@ -9,6 +9,7 @@ use std::sync::{mpsc, Arc, LazyLock};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, thread};
+use anyhow::{anyhow, bail, Error};
 use walkdir::WalkDir;
 
 fn safe_slice(input: &str, index: usize) -> Option<&str> {
@@ -30,7 +31,7 @@ struct TitleResult {
     // episode_number: Option<usize>,
     // naming_result: usize,
     // files_in_group: usize,
-    size_deviation: f32
+    size_deviation: Option<f32>
 }
 
 const SEASON_REGEX: LazyLock<Regex>= LazyLock::new(|| { Regex::new(r"(?i)S(\d{2})[EX](\d{2})").unwrap() });
@@ -87,7 +88,7 @@ fn organize_them(conn: &Connection, base_dir: &Path, source_path: &Path, dest_mo
     let mut current_movie_title: Option<String> = None;
     let mut current_movie_group_key: Option<String> = None;
 
-
+    let mut count: usize = 0;
     for r in rows {
         if let Ok(tr) = r {
             let mut dest_path = PathBuf::new();
@@ -109,15 +110,18 @@ fn organize_them(conn: &Connection, base_dir: &Path, source_path: &Path, dest_mo
 
                 dest_path.push(dest_movie_dir);
 
-                if tr.size_deviation > 0.90f32 {
-                    current_movie_title = Some(tr.title.clone());
+                if let Some(sd) = tr.size_deviation {
+                    if sd > 0.90f32 {
+                        current_movie_title = Some(tr.title.clone());
+                    }
+
+                    dest_path.push(current_movie_title.as_ref().unwrap());
+
+                    if sd < 0.7f32 {
+                        dest_path.push("extras");
+                    }
                 }
 
-                dest_path.push(current_movie_title.as_ref().unwrap());
-
-                if tr.size_deviation < 0.7f32 {
-                    dest_path.push("extras");
-                }
                 dest_path.push(format!("{} - {}",current_movie_title.as_ref().unwrap(), tr.file_name));
                 // println!("{}", tr.path);
                 // println!("  {}", dest_path.display());
@@ -154,9 +158,14 @@ fn organize_them(conn: &Connection, base_dir: &Path, source_path: &Path, dest_mo
                 }
 
                 conn.execute("UPDATE titles SET dest_path = ?1, symlink_path=?2, link_result=?3 WHERE id = ?4", params![out_path, lsp, link_result, &tr.id])?;
+                count += 1;
             }
+        } else if let Err(e) = r {
+            println!("ERROR: failed to process row: {}", e);
         }
     }
+
+    println!("organization done, updated {} files", count);
 
 
     Ok(())
@@ -222,6 +231,10 @@ fn find_name(file_name: &str) -> anyhow::Result<FindNameResult> {
 }
 
 fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_levels: usize) -> anyhow::Result<()> {
+    if !entry_path.exists() {
+        bail!("File at path does not exist, must have been renamed out or deleted: {}", entry_path.display());
+    }
+
     if let Some(ext) = entry_path.extension() {
         let target_ext = ext.to_string_lossy();
         if !EXTENSIONS.contains(&target_ext.as_ref()) {
@@ -275,6 +288,8 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
 fn main() -> anyhow::Result<()> {
     // let base_dir: &Path = Path::new("/Volumes/md0/transmission_data");
     let base_dir: &Path = Path::new("/mnt/md0/transmission_data/");
+    // let base_dir: &Path = Path::new("./test_base");
+
     let source_dir = Path::new("completed");
     let dest_movie_dir =  Path::new("sorted_movies_2");
     let dest_tv_dir = Path::new("sorted_tv_2");
@@ -323,7 +338,9 @@ fn main() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel();
     let watch_conn = Connection::open(&db_path)?;
     let watcher_last_update_requested = last_update_requested.clone();
+
     let _ = thread::spawn(move || {
+
         let mut watcher = RecommendedWatcher::new(tx, Config::default())
             .expect("Failed to initialize watcher");
 
@@ -332,22 +349,26 @@ fn main() -> anyhow::Result<()> {
 
         loop {
             match rx.recv() {
-                Ok(Ok(notify::Event { kind: EventKind::Modify(ModifyKind::Name(RenameMode::To)), paths: ref p, .. } )) => {
+                Ok(Ok(notify::Event { paths: ref p, .. })) => {
+                    let mut do_update = false;
                     for pb in p {
                         match process_discovered_file(&watch_conn, pb.as_path(), root_path_levels) {
-                            Ok(_) => {}
+                            Ok(_) => {
+                                do_update = true;
+                            }
                             Err(e) => {
-                                println!("Failed to process discovered file {:?}", e);
+                                println!("Failed to process discovered file {:?}", pb.as_path());
                             }
                         }
                     }
-                    println!("noticed this file! {:?}", p);
-                    watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
+                    if do_update {
+                        println!("noticed this file! {:?}", p);
+                        watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
+                    }
+                },
 
-                },
-                Ok(_) => {
-                    // println!("something else: {:?}", e);
-                },
+                Ok(Err(e)) => println!("Unexpected watch input: {:?}", e),
+
                 Err(e) => println!("Watch error: {:?}", e),
             }
         }
@@ -357,9 +378,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         if last_update_performed != last_update_requested.load(Ordering::Relaxed) {
             let debounce_time_elapsed = now_as_millis() - last_update_requested.load(Ordering::Relaxed);
-            println!("Received request to reprocess un-curated files... debouncing after 5 secs: {}", debounce_time_elapsed);
-            // we've requested an update, cool, but I want that request to be at least 5 seconds old
-            if debounce_time_elapsed > 5000 {
+            println!("Received request to reprocess un-curated files... debouncing after 2 secs: {}", debounce_time_elapsed);
+            // we've requested an update, cool, but I want that request to be at least 2 seconds old
+            if debounce_time_elapsed > 2000 {
                 println!("Checking for un-curated recently added videos");
                 let _ = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
                 last_update_performed = last_update_requested.load(Ordering::Relaxed);
