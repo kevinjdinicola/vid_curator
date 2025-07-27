@@ -10,6 +10,7 @@ use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, thread};
 use anyhow::{anyhow, bail, Error};
+use notify::EventKind::{Create, Modify};
 use walkdir::WalkDir;
 
 fn safe_slice(input: &str, index: usize) -> Option<&str> {
@@ -286,8 +287,8 @@ fn process_discovered_file(conn: &Connection, entry_path: &Path, root_path_level
 
 
 fn main() -> anyhow::Result<()> {
-    // let base_dir: &Path = Path::new("/Volumes/archive/transmission_data");
-    let base_dir: &Path = Path::new("/mnt/archive/transmission_data/");
+    let base_dir: &Path = Path::new("./test_base");
+    // let base_dir: &Path = Path::new("/mnt/archive/transmission_data/");
     let source_dir = Path::new("completed");
     let dest_movie_dir =  Path::new("sorted_movies_2");
     let dest_tv_dir = Path::new("sorted_tv_2");
@@ -347,7 +348,9 @@ fn main() -> anyhow::Result<()> {
 
         loop {
             match rx.recv() {
-                Ok(Ok(notify::Event { paths: ref p, .. })) => {
+                Ok(Ok(notify::Event { kind: Modify(_),  paths: ref p, .. })) |
+                Ok(Ok(notify::Event { kind: Create(_),  paths: ref p, .. })) => {
+
                     let mut do_update = false;
                     for pb in p {
                         match process_discovered_file(&watch_conn, pb.as_path(), root_path_levels) {
@@ -364,6 +367,8 @@ fn main() -> anyhow::Result<()> {
                         watcher_last_update_requested.store(now_as_millis(), Ordering::Relaxed);
                     }
                 },
+
+                Ok(Ok(notify::Event { .. })) => {},
 
                 Ok(Err(e)) => println!("Unexpected watch input: {:?}", e),
 
