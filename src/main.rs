@@ -381,9 +381,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         if last_update_performed != last_update_requested.load(Ordering::Relaxed) {
             let debounce_time_elapsed = now_as_millis() - last_update_requested.load(Ordering::Relaxed);
-            println!("Received request to reprocess un-curated files... debouncing after 2 secs: {}", debounce_time_elapsed);
+            println!("Received request to reprocess un-curated files... debouncing after 10 secs: {}", debounce_time_elapsed);
             // we've requested an update, cool, but I want that request to be at least 2 seconds old
-            if debounce_time_elapsed > 2000 {
+            if debounce_time_elapsed > 10000 {
                 println!("Checking for un-curated recently added videos");
                 let _ = organize_them(&conn, &p, &source_dir, dest_movie_dir, dest_tv_dir)?;
                 last_update_performed = last_update_requested.load(Ordering::Relaxed);
